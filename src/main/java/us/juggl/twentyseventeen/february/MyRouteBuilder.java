@@ -3,6 +3,7 @@ package us.juggl.twentyseventeen.february;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.builder.ValueBuilder;
 import org.apache.camel.spi.Registry;
+import org.apache.camel.model.rest.RestBindingMode;
 
 /**
  * A Camel Java8 DSL Router
@@ -44,5 +45,14 @@ public class MyRouteBuilder extends RouteBuilder {
         from(baseUri+"&keywords="+keywords)
             .filter(simple("${body.isRetweet()} == false"))
             .multicast().to("seda:tweet2db", "seda:tweet2log");
+        from("seda:tweetById")
+            .setBody(constant("SELECT row_to_json(tweets)::TEXT FROM tweets WHERE id=(:?id::BIGINT) LIMIT 1"))
+            .to("jdbc:lykely?useHeadersAsParameters=true")
+            .transform(simple("${body[0]}"))
+            .transform(regexReplaceAll(simple("${body}"), "^\\{row_to_json=(\\{[^}]*\\})}", "$1"));
+
+        restConfiguration().component("netty4-http").host("localhost").port(8190).bindingMode(RestBindingMode.auto);
+        rest()
+            .get("/v1/tweet/{id}").to("seda:tweetById");
     }
 }
