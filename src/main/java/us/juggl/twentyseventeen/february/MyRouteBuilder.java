@@ -1,9 +1,15 @@
 package us.juggl.twentyseventeen.february;
 
+import org.apache.camel.Exchange;
+import org.apache.camel.Message;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.builder.ValueBuilder;
 import org.apache.camel.spi.Registry;
 import org.apache.camel.model.rest.RestBindingMode;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 
 /**
  * A Camel Java8 DSL Router
@@ -37,7 +43,7 @@ public class MyRouteBuilder extends RouteBuilder {
             .setHeader("status", simple("${body.text}"))                // into SQL values
             .setHeader("created", simple("${body.createdAt.time}"))     // stored in message headers
             .setHeader("screenname", simple("${body.user.screenName}")) // on the Camel Exchange
-            .setBody(queryConst)                                 // Set the prepared statement query
+            .setBody(queryConst)                            // Set the prepared statement query
             .to("jdbc:lykely?useHeadersAsParameters=true"); // Execute query using parameters from header values
 
         from("seda:tweet2log" + SEDA_OPTS).sample(10).log("${body.text}");
@@ -45,14 +51,22 @@ public class MyRouteBuilder extends RouteBuilder {
         from(baseUri+"&keywords="+keywords)
             .filter(simple("${body.isRetweet()} == false"))
             .multicast().to("seda:tweet2db", "seda:tweet2log");
-        from("seda:tweetById")
-            .setBody(constant("SELECT row_to_json(tweets)::TEXT FROM tweets WHERE id=(:?id::BIGINT) LIMIT 1"))
-            .to("jdbc:lykely?useHeadersAsParameters=true")
-            .transform(simple("${body[0]}"))
-            .transform(regexReplaceAll(simple("${body}"), "^\\{row_to_json=(\\{[^}]*\\})}", "$1"));
 
         restConfiguration().component("netty4-http").host("localhost").port(8190).bindingMode(RestBindingMode.auto);
         rest()
-            .get("/v1/tweet/{id}").to("seda:tweetById");
+            .get("/v1/tweet/{id}").to("seda:tweetById").route()
+                .setBody(constant("SELECT row_to_json(tweets)::TEXT FROM tweets WHERE id=(:?id::BIGINT) LIMIT 1"))
+                .to("jdbc:lykely?useHeadersAsParameters=true")
+                .transform().exchange(this::unwrapPostgresJSON).endRest()
+            .get("/v1/tweet/since/{id}").route()
+                .setBody(constant("WITH tweet_rows AS (SELECT row_to_json(tweets)::JSONB FROM tweets WHERE id > :?id::BIGINT) SELECT jsonb_pretty(jsonb_agg(row_to_json)::JSONB) from tweet_rows"))
+                .to("jdbc:lykely?useHeadersAsParameters=true")
+                .transform().exchange(this::unwrapPostgresJSON).endRest();
+    }
+
+    String unwrapPostgresJSON(Exchange e) {
+        Message in = e.getIn();
+        LinkedHashMap row = (LinkedHashMap)((List)in.getBody()).get(0);
+        return (String)row.values().toArray()[0];
     }
 }
